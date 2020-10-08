@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/bin/bash -ex
 
 MOUNT_POINT="/tmp/mntpoint"
 CUR_STEP=1
@@ -16,11 +16,15 @@ DOMA_MISC_PARTITION_ID=5
 DOMA_METADATA_PARTITION_ID=6
 DOMA_SUPER_PARTITION_ID=7
 DOMA_USERDATA_PARTITION_ID=8
+DOMA_RPMBEMUL_PARTITION_ID=9
+
+
+
 
 usage()
 {
 	echo "###############################################################################"
-	echo "SD card image builder script v1.5"
+	echo "SD card image builder script v1.3"
 	echo "###############################################################################"
 	echo "Usage:"
 	echo "`basename "$0"` <-p image-folder> <-d image-file> <-c config> [-s image-size] [-u domain]"
@@ -54,11 +58,7 @@ define_partitions()
 			DOMF_END=$((DOMF_START+4000))  # 8257
 			DOMF_PARTITION=3
 			DOMF_LABEL=domf
-			AOS_START=$DOMF_END
-			AOS_END=$((AOS_START+1024))  # 9281
-			AOS_PARTITION=4
-			AOS_LABEL=aos
-			DEFAULT_IMAGE_SIZE_GIB=$(((AOS_END/1024)+1))
+			DEFAULT_IMAGE_SIZE_GIB=$(((DOMF_END/1024)+1))
 		;;
 		ces2019)
 			# prod-ces2019 [1..257][257..4257][4257..8680]
@@ -87,7 +87,7 @@ define_partitions()
 			DOMD_PARTITION=2
 			DOMD_LABEL=domd
 			DOMA_START=$DOMD_END  # Also is used as flag that DomA is defined
-			DOMA_END=$((DOMA_START+5710))  # 7967
+			DOMA_END=$((DOMA_START+7710))  # 9967
 			DOMA_PARTITION=3
 			DOMA_LABEL=doma
 			DEFAULT_IMAGE_SIZE_GIB=$(((DOMA_END/1024)+1))
@@ -118,7 +118,9 @@ define_partitions()
 print_step()
 {
 	local caption=$1
-	echo "##### Step $CUR_STEP: $caption"
+	echo "###############################################################################"
+	echo "Step $CUR_STEP: $caption"
+	echo "###############################################################################"
 	((CUR_STEP++))
 }
 
@@ -130,6 +132,8 @@ inflate_image()
 	local dev=$1
 	local size_gb=$2
 
+	print_step "Inflate image"
+	echo "DEV -" $dev
 	if  [ -b "$dev" ] ; then
 		echo "Using physical block device $dev"
 		return 0
@@ -143,6 +147,8 @@ inflate_image()
 		echo "Error: device is not connected."
 		exit 1
 	fi
+
+	echo "Inflating image file at $dev of size ${size_gb}GiB"
 
 	local inflate=1
 	if [ -e $1 ] && [ $FORCE_INFLATION -ne 1 ] ; then
@@ -161,7 +167,7 @@ inflate_image()
 		esac
 	fi
 	if [[ $inflate == 1 ]] ; then
-		sudo dd if=/dev/zero of=$dev bs=1M count=0 seek=$(($size_gb*1024)) status=none || exit 1
+		sudo dd if=/dev/zero of=$dev bs=1M count=0 seek=$(($size_gb*1024)) || exit 1
 	fi
 }
 
@@ -179,7 +185,6 @@ partition_image()
 	sudo parted -s $1 mkpart primary ext4 ${DOMD_START}MiB ${DOMD_END}MiB || true
 	if [ ! -z ${DOMF_START} ]; then
 		sudo parted -s $1 mkpart primary ext4 ${DOMF_START}MiB ${DOMF_END}MiB || true
-		sudo parted -s $1 mkpart primary ext4 ${AOS_START}MiB ${AOS_END}MiB || true
 	fi
 	if [ ! -z ${DOMU_START} ]; then
 		sudo parted -s $1 mkpart primary ext4 ${DOMU_START}MiB ${DOMU_END}MiB || true
@@ -194,26 +199,40 @@ partition_image()
 		# We have special handling for Android, because it has it's own partitions.
 		# So, Android has dedicated partition number DOMA_PARTITION. And this partition
 		# contains few 'internal' (Android's native) partitions.
-		print_step "Make Android partitions"
+		print_step "Make Android partitions on "${1}p$DOMA_PARTITION
 
 		local loop_dev_a=`sudo losetup --find --partscan --show ${1}p$DOMA_PARTITION`
 
 		# parted generates error on all operation with "nested" disk, guard it with || true
 		sudo parted $loop_dev_a -s mklabel gpt || true
-		sudo parted $loop_dev_a -s mkpart boot_a    ext4 1MiB  31MiB || true # 30 MiB
-		sudo parted $loop_dev_a -s mkpart boot_b    ext4 32MiB  62MiB || true # 30 MiB
-		sudo parted $loop_dev_a -s mkpart vbmeta_a  ext4 63MiB  64MiB || true # 1 MiB
-		sudo parted $loop_dev_a -s mkpart vbmeta_b  ext4 65MiB  66MiB || true # 1 MiB
-		sudo parted $loop_dev_a -s mkpart misc      ext4 67MiB  68MiB || true # 1 MiB
-		sudo parted $loop_dev_a -s mkpart metadata  ext4 69MiB  80MiB || true # 11 MiB
-		sudo parted $loop_dev_a -s mkpart super     ext4 81MiB  4705MiB || true # 4624 MiB
-		sudo parted $loop_dev_a -s mkpart userdata  ext4 4706MiB  5706MiB || true # 1000 MiB
+		sudo parted $loop_dev_a -s mkpart boot_a   ext4 1MiB  31MiB || true #30
+		sudo parted $loop_dev_a -s mkpart boot_b   ext4 32MiB  62MiB || true #30
+		sudo parted $loop_dev_a -s mkpart vbmeta_a    ext4 63MiB  64MiB || true #1
+		sudo parted $loop_dev_a -s mkpart vbmeta_b    ext4 65MiB  66MiB || true #1
+		sudo parted $loop_dev_a -s mkpart misc      ext4 67MiB  68MiB || true #1
+		sudo parted $loop_dev_a -s mkpart metadata  ext4 69MiB  80MiB || true #11
+		sudo parted $loop_dev_a -s mkpart super    ext4 81MiB  4705MiB || true # 4624
+		sudo parted $loop_dev_a -s mkpart userdata  ext4 4706MiB  7704MiB || true # 3000
+                sudo parted $loop_dev_a -s mkpart RPMBEMUL  ext4 7705MiB  7706MiB || true # 1
 		sudo parted $loop_dev_a -s print
 		sudo partprobe $loop_dev_a || true
 
 		sudo losetup -d $loop_dev_a
 	fi  # [ ! -z ${DOMA_START} ]
 }
+
+		#sudo parted $loop_dev_a -s mkpart system_a    ext4 1MiB  3148MiB || true
+		#sudo parted $loop_dev_a -s mkpart vendor_a    ext4 3149MiB  3418MiB || true
+		#sudo parted $loop_dev_a -s mkpart misc      ext4 3419MiB  3420MiB || true
+		#sudo parted $loop_dev_a -s mkpart vbmeta_a    ext4 3421MiB  3422MiB || true
+		#sudo parted $loop_dev_a -s mkpart metadata  ext4 3423MiB  3434MiB || true
+		#sudo parted $loop_dev_a -s mkpart userdata  ext4 3435MiB  4435MiB || true
+		#sudo parted $loop_dev_a -s mkpart recovery  ext4 4436MiB  4536MiB || true
+		#sudo parted $loop_dev_a -s mkpart boot_a   ext4 4537MiB  4567MiB || true
+		#sudo parted $loop_dev_a -s mkpart system_b    ext4 4568MiB  7716MiB || true
+		#sudo parted $loop_dev_a -s mkpart vendor_b    ext4 7717MiB  7986MiB || true
+		#sudo parted $loop_dev_a -s mkpart boot_b   ext4 7987MiB  8017MiB || true
+		#sudo parted $loop_dev_a -s mkpart vbmeta_b    ext4 8018MiB  8019MiB || true
 
 ###############################################################################
 # Make file system
@@ -225,7 +244,9 @@ mkfs_one()
 	local part=$2
 	local label=$3
 
-	sudo mkfs.ext4 -q -O ^64bit -F ${loop_base}p${part} -L $label
+	print_step "Making ext4 filesystem for $label"
+
+	sudo mkfs.ext4 -O ^64bit -F ${loop_base}p${part} -L $label
 }
 
 mkfs_boot()
@@ -241,7 +262,6 @@ mkfs_domd()
 mkfs_domf()
 {
 	mkfs_one $1 $DOMF_PARTITION $DOMF_LABEL
-	mkfs_one $1 $AOS_PARTITION $AOS_LABEL
 }
 
 mkfs_doma()
@@ -316,8 +336,7 @@ unpack_dom_from_tar()
 	# take the latest - useful if making image from local build
 	local rootfs=`find $dom_root -name "*rootfs.tar.bz2" | xargs ls -t | head -1`
 
-	# align position of filename with similar info for dom0
-	echo "Root filesystem:  " `realpath --relative-to=$db_base_folder $rootfs`
+	echo "Root filesystem is at $rootfs"
 
 	mount_part $loop_base $part $MOUNT_POINT
 
@@ -348,11 +367,11 @@ unpack_dom0()
 	local xenpolicy=`find $domd_root -name xenpolicy`
 	local xenuImage=`find $domd_root -name xen-uImage`
 
-	echo "Dom0 kernel image:" `realpath --relative-to=$db_base_folder $Image`
-	echo "Dom0 initramfs:   " `realpath --relative-to=$db_base_folder $uInitramfs`
-	echo "Dom0 device tree: " `realpath --relative-to=$db_base_folder $dom0dtb`
-	echo "Xen policy:       " `realpath --relative-to=$db_base_folder $xenpolicy`
-	echo "Xen image:        " `realpath --relative-to=$db_base_folder $xenuImage`
+	echo "Dom0 kernel image is at $Image"
+	echo "Dom0 initramfs is at $uInitramfs"
+	echo "Dom0 device tree is at $dom0dtb"
+	echo "Xen policy is at $xenpolicy"
+	echo "Xen image is at $xenuImage"
 
 	if [ $(echo "$Image" | wc -w) -gt 1 ]; then
 		echo "Error: Too many kernel images were found."
@@ -404,31 +423,57 @@ unpack_doma()
 {
 	local db_base_folder=$1
 	local loop_base=$2
+
+	#local raw_system="/tmp/system.raw"
+	#local raw_vendor="/tmp/vendor.raw"
 	local raw_super="/tmp/super.raw"
 
 	print_step "Unpacking DomA"
 
 	local doma_name=`ls $db_base_folder | grep android`
 	local doma_root=$db_base_folder/$doma_name
+	#local system=`find $doma_root -name "system.img"`
+	#local vendor=`find $doma_root -name "vendor.img"`
 	local vbmeta=`find $doma_root -name "vbmeta.img"`
+	#local recovery=`find $doma_root -name "recovery.img"`
+	#local Image=`find $doma_root -name "Image"`
 	local bootimage=`find $doma_root -name "boot.img"`
 	local superimage=`find $doma_root -name "super.img"`
 
-	echo "DomA vbmeta image is at $vbmeta"
+	#echo "DomA system image is at $system"
+	#echo "DomA vendor image is at $vendor"
 	echo "DomA bootimage image is at $bootimage"
 	echo "DomA superimage image is at $superimage"
+	#echo "DomA recovery image is at $recovery"
 
+	#simg2img $system $raw_system
+	#simg2img $vendor $raw_vendor
 	simg2img $superimage $raw_super
 
-	echo "DomA adding super partition"
+	#sudo dd if=$raw_system of=${loop_base}p${DOMA_SYSTEM_A_PARTITION_ID} bs=1M status=progress
+	#sudo dd if=$raw_vendor of=${loop_base}p${DOMA_VENDOR_A_PARTITION_ID} bs=1M status=progress
+	#sudo dd if=$raw_system of=${loop_base}p${DOMA_SYSTEM_B_PARTITION_ID} bs=1M status=progress
+    #sudo dd if=$raw_vendor of=${loop_base}p${DOMA_VENDOR_B_PARTITION_ID} bs=1M status=progress
 	sudo dd if=$raw_super of=${loop_base}p${DOMA_SUPER_PARTITION_ID} bs=1M status=progress
-	echo "DomA adding vbmeta partition"
-	sudo dd if=$vbmeta of=${loop_base}p${DOMA_VBMETA_A_PARTITION_ID} bs=1M status=progress
-	echo "DomA adding boot partition"
-	sudo dd if=$bootimage of=${loop_base}p${DOMA_BOOTIMAGE_A_PARTITION_ID} bs=1M status=progress
+
+	#xxd ${loop_base}p${DOMA_BOOTIMAGE_A_PARTITION_ID}
+
+	if [ ! -z ${vbmeta} ]; then
+		sudo dd if=$vbmeta of=${loop_base}p${DOMA_VBMETA_A_PARTITION_ID} bs=1M status=progress
+		#sudo dd if=$vbmeta of=${loop_base}p${DOMA_VBMETA_B_PARTITION_ID} bs=1M status=progress
+	fi
 
 	echo "Wipe out DomA/misc"
 	sudo dd if=/dev/zero of=${loop_base}p${DOMA_MISC_PARTITION_ID} bs=1M count=1 || true
+	#sudo mkfs.ext4 -O ^64bit -F ${loop_base}p${DOMA_RECOVERY_PARTITION_ID}
+	#mkdir -p /tmp/1
+	#sudo mount ${loop_base}p${DOMA_RECOVERY_PARTITION_ID} /tmp/1
+	#sudo cp $Image /tmp/1
+	#sudo umount /tmp/1
+	#sudo dd if=$recovery of=${loop_base}p${DOMA_RECOVERY_PARTITION_ID} bs=1M status=progress
+	sudo dd if=$bootimage of=${loop_base}p${DOMA_BOOTIMAGE_A_PARTITION_ID} bs=1M status=progress
+	#sudo dd if=$bootimage of=${loop_base}p${DOMA_BOOTIMAGE_B_PARTITION_ID} bs=1M status=progress
+
 
 	rm -f $raw_super
 }
@@ -449,7 +494,7 @@ unpack_image()
 
 	if [ ! -z ${DOMA_START} ]; then
 		local out_adev=${img_output_file}p$DOMA_PARTITION
-		if [[ ! -z `findmnt ${out_adev}` ]] ; then sudo umount -l -f ${out_adev} ; fi
+		sudo umount $out_adev || true
 		while [[ ! (-b $out_adev) ]]; do
 			# wait for $out_adev to appear
 			sleep 1
@@ -469,10 +514,10 @@ make_image()
 	local db_base_folder=$1
 	local img_output_file=$2
 
-	# some partition may be mounted, so unmount them
-	for f in ${img_output_file}* ; do
-		if [[ ! -z `findmnt "${f}"` ]] ; then sudo umount -l -f "${f}" ; fi
-	done
+	print_step "Preparing image at ${img_output_file}"
+	ls ${img_output_file}?* | xargs -n1 sudo umount -l -f || true
+
+	sudo umount -f ${img_output_file}* || true
 
 	partition_image $img_output_file
 
@@ -520,7 +565,15 @@ unpack_domain()
 	esac
 }
 
-#print_step "Parsing input parameters"
+print_step "Checking for simg2img"
+
+if [ $(dpkg-query -W -f='${Status}' android-tools-fsutils 2>/dev/null | grep -c "ok installed") -eq 0 ];
+then
+   echo "Please install simg2img (in debian-based: apt-get install android-tools-fsutils). Exiting.";
+   exit;
+fi
+
+print_step "Parsing input parameters"
 
 while getopts ":p:d:c:s:u:f" opt; do
 	case $opt in
@@ -560,7 +613,6 @@ fi
 define_partitions $ARG_CONFIGURATION
 
 # Check that deploy path contains dom0, domd and doma
-# also check for simg2img for android related images
 dom0_name=`ls ${ARG_DEPLOY_PATH} | grep dom0-image-thin` || true
 if [ -z "$dom0_name" ]; then
 	echo "Error: deploy path has no dom0."
@@ -579,19 +631,15 @@ if [ ! -z ${DOMF_START} ]; then
 	fi
 fi
 if [ ! -z ${DOMA_START} ]; then
-	# simg2img is used only if we have android as guest
-	if [ $(dpkg-query -W -f='${Status}' android-tools-fsutils 2>/dev/null | grep -c "ok installed") -eq 0 ];
-	then
-		echo "Please install simg2img (in debian-based: apt-get install android-tools-fsutils). Exiting.";
-		exit;
-	fi
-
 	doma_name=`ls ${ARG_DEPLOY_PATH} | grep android` || true
 	if [ -z "$doma_name" ]; then
 		echo "Error: deploy path has no doma."
 		exit 2
 	fi
 fi
+
+echo "Using deploy path: \"$ARG_DEPLOY_PATH\""
+echo "Using device     : \"$ARG_DEPLOY_DEV\""
 
 if [ -z ${ARG_IMG_SIZE_GIB} ]; then
 	ARG_IMG_SIZE_GIB=${DEFAULT_IMAGE_SIZE_GIB}
@@ -613,13 +661,13 @@ sudo losetup -d $loop_dev_in
 # if we write to file and we have bmaptool installed then
 # let's create .bmap to speed up flashing of image
 if [ ! -z `which bmaptool` ]; then
-	if  [ ! -b $ARG_DEPLOY_DEV ] ; then
-		print_step "Creating .bmap file"
-		bmaptool create $ARG_DEPLOY_DEV -o $ARG_DEPLOY_DEV.bmap
-		echo ".bmap was created, you can use"
-		echo "sudo bmaptool copy $ARG_DEPLOY_DEV --bmap $ARG_DEPLOY_DEV.bmap /dev/sdX"
-		echo "if bmaptool has no exclusive access to /dev/sdX then use 'sudo umount /dev/sdX?'"
-	fi
+    if  [ ! -b $ARG_DEPLOY_DEV ] ; then
+        print_step "Creating .bmap file"
+        bmaptool create $ARG_DEPLOY_DEV -o $ARG_DEPLOY_DEV.bmap
+        echo ".bmap was created, you can use"
+        echo "sudo bmaptool copy $ARG_DEPLOY_DEV --bmap $ARG_DEPLOY_DEV.bmap /dev/sdX"
+        echo "use 'sudo umount /dev/sdX?' if bmaptool has no exclusive access to /dev/sdX"
+    fi
 fi
 
 print_step "Done all steps"
